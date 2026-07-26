@@ -61,6 +61,22 @@ Alternativ, falls Node installiert ist: `npx serve .`
 
 ## Auf GitHub veröffentlichen
 
+Nur noch **3 Dateien, keine Unterordner**: `index.html`, `manifest.webmanifest`,
+`service-worker.js`. Das ist bewusst so — beim Hochladen über die GitHub-Website
+(besonders vom Handy aus) gehen Unterordner wie `css/` oder `js/` beim Drag & Drop
+schnell verloren, und dann lädt die Seite lautlos nicht (genau das ist beim letzten
+Versuch passiert: CSS und JS haben gefehlt, darum blieb der Bildschirm leer).
+Mit nur drei losen Dateien auf einer Ebene kann das nicht mehr passieren.
+
+**Hochladen (am Handy, ohne Terminal):**
+1. Im Repo auf **"Add file" → "Upload files"** tippen.
+2. Alle drei Dateien einzeln auswählen (nicht als Ordner) und hochladen.
+3. Falls du bereits eine alte Version hochgeladen hast: die alten `css/`- und
+   `js/`-Ordner im Repo vorher löschen (jeweils in den Ordner rein, "..." → Delete),
+   damit nichts Verwaistes liegen bleibt.
+4. Unten "Commit changes".
+
+**Mit Git am Rechner:**
 ```bash
 cd schuldenkompass
 git init
@@ -74,9 +90,6 @@ git push -u origin main
 Dann auf GitHub: **Settings → Pages → Source: Deploy from a branch → Branch: `main`,
 Ordner `/ (root)` → Save.** Nach ein bis zwei Minuten ist die App unter
 `https://DEIN-NUTZERNAME.github.io/schuldenkompass/` erreichbar.
-
-> Falls du das Repo umbenennst oder unter einem anderen Pfad hostest: Alle Pfade in
-> der App sind relativ, du musst also nichts anpassen.
 
 ## Zum iPhone-Homescreen hinzufügen
 
@@ -102,21 +115,17 @@ Das schützt deine Finanzdaten, hat aber zwei Konsequenzen:
 
 ```
 schuldenkompass/
-├── index.html
-├── manifest.webmanifest       PWA-Manifest
-├── service-worker.js          Offline-Cache
-├── css/styles.css
-├── js/app.js                  Die gesamte App-Logik, klar in Abschnitte gegliedert:
-│                                 Formatierung → abgeleitete Werte → Charts →
-│                                 Tilgungs-Engine → Storage → Store → UI-Helfer →
-│                                 Views (Cockpit/Einkommen/Fixkosten/Schulden/Plan/
-│                                 Einstellungen) → App-Einstieg
-└── icons/
+├── index.html                 Alles in einer Datei: HTML + <style> (CSS) +
+│                                 <script> (die komplette App-Logik) + Icons
+│                                 als eingebettete Bilddaten. Innerhalb klar
+│                                 mit Kommentar-Trennern gegliedert:
+│                                 Formatierung → Tilgungs-Engine → Storage →
+│                                 Store → UI-Helfer → Views → App-Einstieg
+├── manifest.webmanifest       PWA-Manifest (Icons ebenfalls eingebettet)
+└── service-worker.js          Offline-Cache
 ```
 
-Bewusst eine einzige JS-Datei statt vieler kleiner Module: kein Build-Schritt,
-kein Modul-Ladewasserfall, einfacher zu überblicken und zu ändern. Innerhalb ist
-die Datei mit Kommentar-Trennern klar in die genannten Abschnitte unterteilt.
+Keine Unterordner mehr — nichts, was beim Hochladen verloren gehen kann.
 
 ## Lizenz
 

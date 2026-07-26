@@ -8,12 +8,7 @@ const CACHE_NAME = `schuldenkompass-${CACHE_VERSION}`;
 const PRECACHE_URLS = [
   './',
   'index.html',
-  'manifest.webmanifest',
-  'css/styles.css',
-  'js/app.js',
-  'icons/icon-192.png',
-  'icons/icon-512.png',
-  'icons/apple-touch-icon.png'
+  'manifest.webmanifest'
 ];
 
 self.addEventListener('install', (event) => {
