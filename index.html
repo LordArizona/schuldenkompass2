@@ -291,6 +291,30 @@ p { margin: 0; }
 }
 
 /* ---------- Cockpit / Kompass-Dial ---------- */
+.phase-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 8px;
+}
+.phase-banner__icon {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-size: 15px;
+}
+.phase-banner__title {
+  font-weight: 600;
+  font-size: 14.5px;
+}
+
 .cockpit-hero {
   display: flex;
   flex-direction: column;
@@ -446,6 +470,10 @@ p { margin: 0; }
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="6" width="19" height="13" rx="2"/><path d="M2.5 10.5h19M6 15h4"/></svg>
         <span>Schulden</span>
       </button>
+      <button class="tabbar__item" data-tab="savings">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+        <span>Sparen</span>
+      </button>
       <button class="tabbar__item" data-tab="plan">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 19V9M11 19V5M18 19v-7"/></svg>
         <span>Plan</span>
@@ -591,6 +619,30 @@ function debtTypeLabel(type) {
     sonstige: 'Sonstige Schuld'
   };
   return labels[type] || 'Sonstige Schuld';
+}
+
+/** Zielgröße des Notgroschens: X Monate Fixkosten (Standard: 3, einstellbar). */
+function emergencyFundTarget(state) {
+  const months = Number(state.emergencyFund.targetMonths) || 0;
+  return months * totalFixedCosts(state.fixedCosts);
+}
+
+function investmentTypeLabel(type) {
+  const labels = {
+    etf: 'ETF-Sparplan',
+    aktien: 'Aktien',
+    tagesgeld: 'Tagesgeld / Festgeld',
+    sonstiges: 'Sonstiges'
+  };
+  return labels[type] || 'Sonstiges';
+}
+
+function totalInvestments(investments) {
+  return investments.reduce((s, i) => s + (Number(i.balance) || 0), 0);
+}
+
+function totalMonthlyInvestmentContributions(investments) {
+  return investments.reduce((s, i) => s + (Number(i.monthlyContribution) || 0), 0);
 }
 
 
@@ -884,6 +936,68 @@ function totalDebtBalance(debts) {
 
 
 // ============================================================
+// Finanzplan-Engine (Wasserfall: Schulden → Notgroschen → Investieren)
+// ============================================================
+// Setzt den Drei-Phasen-Plan direkt um: Solange Schulden offen sind, bekommt die
+// Tilgung den vollen Fokus. Erst wenn schuldenfrei, fließt das Budget in den
+// Notgroschen, bis das Ziel erreicht ist. Danach steht das gesamte Budget fürs
+// Investieren/Sparen zur Verfügung. Kein Verwässern über mehrere Ziele gleichzeitig —
+// das ist bewusst so, weil sequenzielle Priorisierung schneller zum Ziel führt.
+
+function computeWaterfall(state) {
+  const budget = Math.max(0, tilgungsBudget(state));
+  const debtTotal = totalDebtBalance(state.debts);
+  const efTarget = emergencyFundTarget(state);
+  const efBalance = Number(state.emergencyFund.balance) || 0;
+
+  let remaining = budget;
+  let toDebt = 0, toEmergencyFund = 0, toInvest = 0;
+  let phase;
+
+  if (debtTotal > 0.01) {
+    toDebt = remaining;
+    remaining = 0;
+    phase = 'debt';
+  } else if (efBalance < efTarget - 0.01) {
+    const gap = efTarget - efBalance;
+    toEmergencyFund = Math.min(remaining, gap);
+    remaining -= toEmergencyFund;
+    toInvest = remaining;
+    phase = 'emergency';
+  } else {
+    toInvest = remaining;
+    phase = 'invest';
+  }
+
+  return { budget, toDebt, toEmergencyFund, toInvest, phase, efTarget, efBalance, debtTotal };
+}
+
+/**
+ * Zinseszins-Projektion: Startkapital + monatliche Einzahlung bei angenommener
+ * jährlicher Rendite. Reine Simulation auf Basis einer selbst gewählten Annahme —
+ * keine Anlageberatung, keine Renditegarantie, historische Werte sind kein
+ * verlässlicher Indikator für die Zukunft.
+ */
+function investmentProjection(startBalance, monthlyContribution, annualReturnPct, months) {
+  const r = (Number(annualReturnPct) || 0) / 100 / 12;
+  let balance = Number(startBalance) || 0;
+  let contributed = Number(startBalance) || 0;
+  const points = [{ month: 0, balance, contributed, growth: 0 }];
+  for (let m = 1; m <= months; m++) {
+    balance = balance * (1 + r) + (Number(monthlyContribution) || 0);
+    contributed += Number(monthlyContribution) || 0;
+    points.push({
+      month: m,
+      balance: Math.round(balance * 100) / 100,
+      contributed: Math.round(contributed * 100) / 100,
+      growth: Math.round((balance - contributed) * 100) / 100
+    });
+  }
+  return points;
+}
+
+
+// ============================================================
 // localStorage + JSON-Backup
 // ============================================================
 // Kein Server, kein Tracking, kein Sync — bewusst so gewählt für sensible Finanzdaten.
@@ -973,6 +1087,16 @@ function defaultState() {
     },
     paymentLog: [
       // { id, month:'2026-07', debtId, amount }
+    ],
+    emergencyFund: {
+      targetMonths: 3, // Ziel: X Monate Fixkosten als Puffer
+      balance: 0
+    },
+    investments: [
+      // { id, name, type: 'etf'|'aktien'|'tagesgeld'|'sonstiges', balance, monthlyContribution, expectedReturn }
+    ],
+    savingsLog: [
+      // { id, month:'2026-07', target: 'emergencyFund' | investmentId, amount }
     ]
   };
 }
@@ -1077,6 +1201,41 @@ class Store {
     this.state.paymentLog = this.state.paymentLog.filter(p => p.id !== id);
     this._notify();
   }
+
+  // ---- Notgroschen ----
+  updateEmergencyFund(patch) {
+    Object.assign(this.state.emergencyFund, patch);
+    this._notify();
+  }
+  depositEmergencyFund(amount) {
+    this.state.emergencyFund.balance = Math.max(0, Number(this.state.emergencyFund.balance) + Number(amount));
+    this._notify();
+  }
+
+  // ---- Sparen & Investieren ----
+  addInvestment(entry) {
+    this.state.investments.push({ id: uid('inv'), ...entry });
+    this._notify();
+  }
+  updateInvestment(id, patch) {
+    const item = this.state.investments.find(i => i.id === id);
+    if (item) Object.assign(item, patch);
+    this._notify();
+  }
+  removeInvestment(id) {
+    this.state.investments = this.state.investments.filter(i => i.id !== id);
+    this._notify();
+  }
+
+  // ---- Spar-Log (fürs "diesen Monat eingezahlt" je Ziel) ----
+  logSaving(month, target, amount) {
+    this.state.savingsLog.push({ id: uid('sav'), month, target, amount });
+    this._notify();
+  }
+  removeSavingsLog(id) {
+    this.state.savingsLog = this.state.savingsLog.filter(s => s.id !== id);
+    this._notify();
+  }
 }
 
 function migrate(state) {
@@ -1085,7 +1244,8 @@ function migrate(state) {
   return {
     ...base,
     ...state,
-    settings: { ...base.settings, ...(state.settings || {}) }
+    settings: { ...base.settings, ...(state.settings || {}) },
+    emergencyFund: { ...base.emergencyFund, ...(state.emergencyFund || {}) }
   };
 }
 
@@ -1189,29 +1349,69 @@ function renderCockpit(container, state) {
   const hasDebts = debts.length > 0;
   const hasIncomeData = state.income.length > 0 || state.fixedCosts.length > 0;
 
+  const wf = computeWaterfall(state);
+  const efTarget = wf.efTarget;
+  const efBalance = wf.efBalance;
+  const efPct = efTarget > 0 ? Math.min(100, (efBalance / efTarget) * 100) : (efBalance > 0 ? 100 : 0);
+  const investments = state.investments;
+  const investedTotal = totalInvestments(investments);
+  const investMonthly = totalMonthlyInvestmentContributions(investments);
+
   let sim = null;
   if (hasDebts && budget > 0) {
     sim = simulatePayoff(debts, budget, state.settings.strategy, state.settings.hybridWeight);
   }
 
+  const PHASE_INFO = {
+    debt: { icon: '①', title: 'Phase 1 · Schulden tilgen', desc: 'Volle Konzentration auf die Tilgung — Notgroschen und Investieren warten noch.' },
+    emergency: { icon: '②', title: 'Phase 2 · Notgroschen aufbauen', desc: 'Schuldenfrei! Jetzt erst ein Polster für Unvorhergesehenes, bevor investiert wird.' },
+    invest: { icon: '③', title: 'Phase 3 · Investieren & Vermögen aufbauen', desc: 'Schulden getilgt, Notgroschen voll — jetzt zählt der lange Atem beim Investieren.' }
+  };
+  const phaseInfo = PHASE_INFO[wf.phase];
+
+  let heroPct = 100, heroLabel = 'geschafft', heroValue = '—';
+  if (wf.phase === 'debt') {
+    heroPct = paidOffPct;
+    heroLabel = 'Schulden bereits getilgt';
+    heroValue = Math.round(paidOffPct) + '\u00A0%';
+  } else if (wf.phase === 'emergency') {
+    heroPct = efPct;
+    heroLabel = 'Notgroschen gefüllt';
+    heroValue = Math.round(efPct) + '\u00A0%';
+  } else {
+    heroPct = 100;
+    heroLabel = 'Schulden & Notgroschen erledigt';
+    heroValue = '✓';
+  }
+
   container.innerHTML = `
+    <div class="card phase-banner">
+      <div class="phase-banner__icon">${phaseInfo.icon}</div>
+      <div>
+        <div class="phase-banner__title">${phaseInfo.title}</div>
+        <div class="field-hint" style="margin-top:2px;">${phaseInfo.desc}</div>
+      </div>
+    </div>
+
     <div class="cockpit-hero">
       <div class="cockpit-hero__gauge-wrap">
-        ${compassGaugeSVG(hasDebts ? paidOffPct : 100)}
+        ${compassGaugeSVG(hasDebts || wf.phase !== 'debt' ? heroPct : 100)}
         <div class="cockpit-hero__center">
-          <div class="cockpit-hero__pct tabular">${hasDebts ? Math.round(paidOffPct) + '\u00A0%' : '—'}</div>
-          <div class="cockpit-hero__label">${hasDebts ? 'bereits getilgt' : 'noch keine Schulden erfasst'}</div>
+          <div class="cockpit-hero__pct tabular">${heroValue}</div>
+          <div class="cockpit-hero__label">${heroLabel}</div>
         </div>
       </div>
     </div>
 
-    ${!hasDebts ? `
+    ${!hasDebts && wf.phase === 'debt' ? `
       <div class="empty-state">
         <div class="empty-state__icon">⟡</div>
         <p>Trag zuerst deine Schulden ein, damit dein Kompass einen Kurs berechnen kann.</p>
         <button class="btn btn--primary" style="margin-top:14px; width:auto; padding-left:22px; padding-right:22px;" data-goto="debts">Schulden erfassen</button>
       </div>
-    ` : `
+    ` : ''}
+
+    ${hasDebts ? `
       <div class="stat-grid">
         <div class="stat-card">
           <div class="stat-card__label">Restschuld gesamt</div>
@@ -1222,7 +1422,7 @@ function renderCockpit(container, state) {
           <div class="stat-card__value tabular">${sim && sim.reachedZero ? monthLong(monthsFromNow(sim.months)) : '—'}</div>
         </div>
         <div class="stat-card">
-          <div class="stat-card__label">Tilgungsbudget / Monat</div>
+          <div class="stat-card__label">Budget / Monat</div>
           <div class="stat-card__value stat-card__value--good tabular">${euro(budget)}</div>
         </div>
         <div class="stat-card">
@@ -1249,7 +1449,26 @@ function renderCockpit(container, state) {
           <canvas id="cockpit-chart"></canvas>
         </div>
       </div>
-    `}
+    ` : ''}
+
+    ${!hasDebts ? `
+      <div class="section-title">Notgroschen</div>
+      <div class="card stack">
+        <div class="row"><span class="row-label">Ziel (${state.emergencyFund.targetMonths} Monate Fixkosten)</span><span class="row-value tabular">${euro(efTarget)}</span></div>
+        <div class="row"><span class="row-label">Aktueller Stand</span><span class="row-value tabular" style="color:var(--good)">${euro(efBalance)}</span></div>
+        <div class="progress-bar"><div class="progress-bar__fill" style="width:${efPct}%;"></div></div>
+        ${wf.phase === 'emergency' ? `<div class="field-hint">Noch ${euro(Math.max(0, efTarget - efBalance))} bis zum Ziel — bei ${euro(wf.toEmergencyFund)}/Monat aus deinem freien Budget.</div>` : `<div class="field-hint">Ziel erreicht — das restliche Budget fließt jetzt automatisch ins Investieren.</div>`}
+      </div>
+    ` : ''}
+
+    ${investments.length > 0 ? `
+      <div class="section-title">Sparen & Investieren</div>
+      <div class="card stack">
+        <div class="row"><span class="row-label">Aktuell investiert</span><span class="row-value tabular" style="color:var(--accent)">${euro(investedTotal)}</span></div>
+        <div class="row"><span class="row-label">Eingerichtete monatl. Sparraten</span><span class="row-value tabular">${euro(investMonthly)}</span></div>
+        ${wf.phase === 'invest' ? `<div class="field-hint">Verfügbar fürs Investieren laut Plan: ${euro(wf.toInvest)}/Monat.</div>` : ''}
+      </div>
+    ` : ''}
 
     ${hasIncomeData ? `
       <div class="section-title">Monatliche Übersicht</div>
@@ -1258,14 +1477,14 @@ function renderCockpit(container, state) {
         <div class="row"><span class="row-label">Fixkosten</span><span class="row-value tabular">− ${euro(fixed)}</span></div>
         <div class="row"><span class="row-label">Sicherheitspuffer</span><span class="row-value tabular">− ${euro(state.settings.buffer || 0)}</span></div>
         <div class="row" style="border-top:1px solid var(--border); padding-top:10px; margin-top:2px;">
-          <span class="row-label" style="font-weight:600; color:var(--text)">Frei für Tilgung</span>
+          <span class="row-label" style="font-weight:600; color:var(--text)">Frei fürs Finanzziel</span>
           <span class="row-value tabular" style="color:var(--accent)">${euro(freeBudget(state))}</span>
         </div>
       </div>
     ` : `
       <div class="section-title">Monatliche Übersicht</div>
       <div class="empty-state">
-        <p>Erfasse dein Einkommen und deine Fixkosten, damit dein Kompass dein monatliches Tilgungsbudget berechnen kann.</p>
+        <p>Erfasse dein Einkommen und deine Fixkosten, damit dein Kompass dein monatliches Budget berechnen kann.</p>
       </div>
     `}
   `;
@@ -1713,6 +1932,236 @@ function openDebtForm(id = null) {
 
 
 // ============================================================
+// View: Sparen (Notgroschen & Investieren)
+// ============================================================
+function aggregateInvestmentProjection(investments, years) {
+  const months = years * 12;
+  let balance = 0, contributed = 0;
+  for (const inv of investments) {
+    const proj = investmentProjection(inv.balance, inv.monthlyContribution, inv.expectedReturn, months);
+    const last = proj[proj.length - 1];
+    balance += last.balance;
+    contributed += last.contributed;
+  }
+  return { balance, contributed, growth: balance - contributed };
+}
+
+function renderSavings(container, state) {
+  const ef = state.emergencyFund;
+  const efTarget = emergencyFundTarget(state);
+  const efPct = efTarget > 0 ? Math.min(100, (Number(ef.balance) / efTarget) * 100) : (ef.balance > 0 ? 100 : 0);
+  const wf = computeWaterfall(state);
+  const investments = state.investments;
+
+  container.innerHTML = `
+    <div class="section-title">Notgroschen</div>
+    <div class="card stack">
+      <div class="row"><span class="row-label">Ziel (${ef.targetMonths} Monate Fixkosten)</span><span class="row-value tabular">${euro(efTarget)}</span></div>
+      <div class="row"><span class="row-label">Aktueller Stand</span><span class="row-value tabular" style="color:var(--good)">${euro(ef.balance)}</span></div>
+      <div class="progress-bar"><div class="progress-bar__fill" style="width:${efPct}%;"></div></div>
+      <div class="field-hint">${efPct >= 100 && efTarget > 0 ? 'Ziel erreicht — sehr gut abgesichert.' : `Noch ${euro(Math.max(0, efTarget - ef.balance))} bis zum Ziel.`}</div>
+      <div class="field-row" style="margin-top:6px;">
+        <button class="btn btn--secondary btn--sm" id="ef-edit-target" style="flex:1;">Ziel anpassen</button>
+        <button class="btn btn--primary btn--sm" id="ef-deposit" style="flex:1;">+ Einzahlen</button>
+      </div>
+    </div>
+    ${wf.phase === 'emergency' ? `
+      <div class="callout callout--accent" style="margin-top:10px;">
+        Laut Plan fließen aktuell <strong>${euro(wf.toEmergencyFund)}/Monat</strong> aus deinem freien Budget in den Notgroschen.
+      </div>
+    ` : ''}
+    ${wf.phase === 'debt' ? `
+      <div class="callout callout--accent" style="margin-top:10px;">
+        Solange noch Schulden offen sind, hat die Tilgung Vorrang. Der Notgroschen ist als Nächstes dran.
+      </div>
+    ` : ''}
+
+    <div class="section-title">Sparen & Investieren</div>
+    ${investments.length === 0 ? `
+      <div class="empty-state">
+        <div class="empty-state__icon">↗</div>
+        <p>Trag hier deine Spar- und Investmentpläne ein — z. B. einen ETF-Sparplan auf einen breiten Weltindex.</p>
+      </div>
+    ` : `
+      <div class="stack">${investments.map(inv => renderInvestmentItem(inv)).join('')}</div>
+      <div class="card" style="margin-top:12px;">
+        <div class="stack">
+          <div class="row"><span class="row-label">Investiert gesamt</span><span class="row-value tabular" style="color:var(--accent)">${euro(totalInvestments(investments))}</span></div>
+          <div class="row"><span class="row-label">Monatliche Sparraten gesamt</span><span class="row-value tabular">${euro(totalMonthlyInvestmentContributions(investments))}</span></div>
+        </div>
+      </div>
+    `}
+    <button class="fab-add" id="add-investment-btn">+ Spar-/Investmentziel hinzufügen</button>
+
+    ${wf.phase === 'invest' ? `
+      <div class="callout callout--accent" style="margin-top:14px;">
+        Schulden getilgt, Notgroschen voll — laut Plan stehen dir aktuell <strong>${euro(wf.toInvest)}/Monat</strong> fürs Investieren zur Verfügung.
+      </div>
+    ` : ''}
+
+    ${investments.length > 0 ? `
+      <div class="section-title">Projektion (Zinseszins)</div>
+      <div class="card" style="overflow-x:auto;">
+        <table class="strategy-table">
+          <thead><tr><th>In …</th><th>Eingezahlt</th><th>Vermögen</th><th>davon Rendite</th></tr></thead>
+          <tbody>
+            ${[1, 5, 10, 20, 30].map(years => {
+              const p = aggregateInvestmentProjection(investments, years);
+              return `<tr><td>${years} ${years === 1 ? 'Jahr' : 'Jahren'}</td><td>${euro(p.contributed)}</td><td>${euro(p.balance)}</td><td style="color:var(--good)">${euro(p.growth)}</td></tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+        <p class="field-hint" style="margin-top:10px;">Simulation auf Basis deiner eigenen Rendite-Annahme je Ziel — keine Anlageberatung, keine Garantie. Tatsächliche Wertentwicklungen schwanken, besonders bei Aktien/ETFs, und die Vergangenheit ist kein verlässlicher Indikator für die Zukunft.</p>
+      </div>
+    ` : ''}
+  `;
+
+  container.querySelector('#ef-deposit').addEventListener('click', () => openEmergencyFundDepositForm());
+  container.querySelector('#ef-edit-target').addEventListener('click', () => openEmergencyFundTargetForm());
+  container.querySelector('#add-investment-btn').addEventListener('click', () => openInvestmentForm());
+  container.querySelectorAll('[data-edit-inv]').forEach(btn => {
+    btn.addEventListener('click', () => openInvestmentForm(btn.dataset.editInv));
+  });
+  container.querySelectorAll('[data-delete-inv]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const item = investments.find(i => i.id === btn.dataset.deleteInv);
+      const ok = await confirmAction(`"${item.name}" wirklich löschen?`);
+      if (ok) {
+        store.removeInvestment(btn.dataset.deleteInv);
+        toast('Gelöscht');
+      }
+    });
+  });
+}
+
+function renderInvestmentItem(inv) {
+  return `
+    <div class="card">
+      <div class="row" style="align-items:flex-start;">
+        <div class="item-card__main">
+          <div class="item-card__name">${escapeHtml(inv.name)}</div>
+          <div class="item-card__meta"><span class="pill" style="margin-top:4px;">${investmentTypeLabel(inv.type)}</span></div>
+        </div>
+        <div class="item-card__actions">
+          <button class="icon-btn" data-edit-inv="${inv.id}" aria-label="Bearbeiten"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+          <button class="icon-btn" data-delete-inv="${inv.id}" aria-label="Löschen"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2m-8 0 1 13a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2l1-13"/></svg></button>
+        </div>
+      </div>
+      <div class="stat-grid" style="margin-top:12px;">
+        <div>
+          <div class="stat-card__label">Aktueller Wert</div>
+          <div class="row-value tabular" style="font-size:16px;">${euro(inv.balance)}</div>
+        </div>
+        <div>
+          <div class="stat-card__label">Sparrate / Monat</div>
+          <div class="row-value tabular" style="font-size:16px;">${euro(inv.monthlyContribution)}</div>
+        </div>
+        <div>
+          <div class="stat-card__label">Angenommene Rendite p. a.</div>
+          <div class="row-value tabular" style="font-size:16px;">${percent(inv.expectedReturn, 1)}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function openEmergencyFundDepositForm() {
+  const body = `
+    <div class="field">
+      <label for="ef-amount">Betrag</label>
+      <input id="ef-amount" type="number" inputmode="decimal" step="0.01" placeholder="0,00" autofocus />
+    </div>
+    <div class="field-hint" style="margin-bottom:14px;">Negative Zahl für eine Entnahme, falls der Notgroschen mal gebraucht wird.</div>
+    <button class="btn btn--primary" id="ef-deposit-save">Eintragen</button>
+  `;
+  const sheet = openSheet('Notgroschen: Einzahlung', body);
+  sheet.querySelector('#ef-amount').focus();
+  sheet.querySelector('#ef-deposit-save').addEventListener('click', () => {
+    const amount = parseFloat(sheet.querySelector('#ef-amount').value.replace(',', '.')) || 0;
+    store.depositEmergencyFund(amount);
+    store.logSaving(currentMonthKey(), 'emergencyFund', amount);
+    closeSheet();
+    toast('Eingetragen');
+  });
+}
+
+function openEmergencyFundTargetForm() {
+  const state = store.getState();
+  const body = `
+    <div class="field">
+      <label for="ef-months">Ziel in Monaten Fixkosten</label>
+      <input id="ef-months" type="number" min="1" step="1" value="${state.emergencyFund.targetMonths}" />
+      <div class="field-hint">Üblich empfohlen werden 3–6 Monate deiner Fixkosten als Polster für Unvorhergesehenes.</div>
+    </div>
+    <button class="btn btn--primary" id="ef-target-save">Speichern</button>
+  `;
+  const sheet = openSheet('Notgroschen-Ziel', body);
+  sheet.querySelector('#ef-target-save').addEventListener('click', () => {
+    const months = parseInt(sheet.querySelector('#ef-months').value, 10) || 0;
+    store.updateEmergencyFund({ targetMonths: months });
+    closeSheet();
+    toast('Gespeichert');
+  });
+}
+
+const INVESTMENT_TYPES = ['etf', 'aktien', 'tagesgeld', 'sonstiges'];
+
+function openInvestmentForm(id = null) {
+  const state = store.getState();
+  const existing = id ? state.investments.find(i => i.id === id) : null;
+
+  const body = `
+    <div class="field">
+      <label for="f-name">Bezeichnung</label>
+      <input id="f-name" type="text" placeholder="z. B. MSCI World Sparplan" value="${existing ? escapeHtml(existing.name) : ''}" />
+    </div>
+    <div class="field">
+      <label for="f-type">Art</label>
+      <select id="f-type">
+        ${INVESTMENT_TYPES.map(t => `<option value="${t}" ${existing && existing.type === t ? 'selected' : ''}>${investmentTypeLabel(t)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-balance">Aktueller Wert</label>
+      <input id="f-balance" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0,00" value="${existing ? existing.balance ?? '' : ''}" />
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="f-contribution">Sparrate / Monat</label>
+        <input id="f-contribution" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0,00" value="${existing ? existing.monthlyContribution ?? '' : ''}" />
+      </div>
+      <div class="field">
+        <label for="f-return">Angenommene Rendite p. a. (%)</label>
+        <input id="f-return" type="number" inputmode="decimal" step="0.1" placeholder="z. B. 7" value="${existing ? existing.expectedReturn ?? '' : ''}" />
+      </div>
+    </div>
+    <div class="field-hint" style="margin-bottom:14px;">
+      Die Rendite ist eine Annahme für die Projektion, keine Garantie — historische Durchschnittswerte breiter Aktienindizes schwanken stark von Jahr zu Jahr.
+    </div>
+    <button class="btn btn--primary" id="f-save">${existing ? 'Speichern' : 'Hinzufügen'}</button>
+  `;
+
+  const sheet = openSheet(existing ? 'Investment bearbeiten' : 'Investment hinzufügen', body);
+  sheet.querySelector('#f-save').addEventListener('click', () => {
+    const name = sheet.querySelector('#f-name').value.trim();
+    const type = sheet.querySelector('#f-type').value;
+    const balance = parseFloat(sheet.querySelector('#f-balance').value.replace(',', '.')) || 0;
+    const monthlyContribution = parseFloat(sheet.querySelector('#f-contribution').value.replace(',', '.')) || 0;
+    const expectedReturn = parseFloat(sheet.querySelector('#f-return').value.replace(',', '.')) || 0;
+    if (!name) { toast('Bitte einen Namen eingeben'); return; }
+
+    if (existing) {
+      store.updateInvestment(existing.id, { name, type, balance, monthlyContribution, expectedReturn });
+    } else {
+      store.addInvestment({ name, type, balance, monthlyContribution, expectedReturn });
+    }
+    closeSheet();
+    toast('Gespeichert');
+  });
+}
+
+
+// ============================================================
 // View: Tilgungsplan
 // ============================================================
 const STRATEGY_INFO = {
@@ -1734,16 +2183,20 @@ function renderPlan(container, state) {
   const debts = state.debts;
 
   if (debts.length === 0) {
+    const wf = computeWaterfall(state);
     container.innerHTML = `
       <div class="section-title">Tilgungsplan</div>
       <div class="empty-state">
-        <div class="empty-state__icon">➤</div>
-        <p>Sobald du mindestens eine Schuld erfasst hast, berechnet der Kompass hier deinen Tilgungsplan.</p>
-        <button class="btn btn--primary" style="margin-top:14px; width:auto; padding-left:22px; padding-right:22px;" id="goto-debts">Schulden erfassen</button>
+        <div class="empty-state__icon">✓</div>
+        <p>
+          Keine Schulden erfasst — dieser Tab wird wieder aktiv, sobald du eine Schuld einträgst.
+          ${wf.budget > 0 ? `Aktuell fließt dein freies Budget von ${euro(wf.budget)}/Monat automatisch in ${wf.phase === 'emergency' ? 'deinen Notgroschen' : 'dein Investieren'} — schau dir das im Tab <strong>Sparen</strong> an.` : ''}
+        </p>
+        <button class="btn btn--primary" style="margin-top:14px; width:auto; padding-left:22px; padding-right:22px;" id="goto-savings">Zu Sparen &amp; Investieren</button>
       </div>
     `;
-    container.querySelector('#goto-debts').addEventListener('click', () => {
-      document.querySelector('.tabbar__item[data-tab="debts"]')?.click();
+    container.querySelector('#goto-savings').addEventListener('click', () => {
+      document.querySelector('.tabbar__item[data-tab="savings"]')?.click();
     });
     return;
   }
@@ -2100,6 +2553,7 @@ const TABS = {
   income: renderIncome,
   fixedCosts: renderFixedCosts,
   debts: renderDebts,
+  savings: renderSavings,
   plan: renderPlan
 };
 
