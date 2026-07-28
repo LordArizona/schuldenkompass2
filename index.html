@@ -263,8 +263,9 @@ p { margin: 0; }
 }
 .field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .field-hint { font-size: 12px; color: var(--text-faint); }
-.field-row { display: flex; gap: 10px; }
-.field-row .field { flex: 1; }
+.field-row { display: flex; gap: 10px; min-width: 0; }
+.field-row .field { flex: 1; min-width: 0; }
+.field-row .field input { width: 100%; min-width: 0; box-sizing: border-box; }
 
 .segmented {
   display: flex;
@@ -321,6 +322,23 @@ p { margin: 0; }
   align-items: center;
   padding: 18px 0 6px;
 }
+.cockpit-hero--projection {
+  padding: 16px 4px 6px;
+  text-align: center;
+}
+.cockpit-hero__proj-label {
+  font-size: 12px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.cockpit-hero__proj-value {
+  font-family: var(--font-display);
+  font-size: 34px;
+  color: var(--accent);
+  margin-top: 4px;
+}
+
 .cockpit-hero__gauge-wrap {
   display: grid;
   place-items: center;
@@ -652,12 +670,111 @@ function totalMonthlyInvestmentContributions(investments) {
 // Bewusst ohne externe Chart-Bibliothek: keine CDN-Abhängigkeit, funktioniert offline
 // in der installierten PWA ohne zusätzliches Gewicht.
 
+/** Kompakte Achsenbeschriftung für Geldbeträge, z. B. "36k €" oder "1,2M €". */
+function axisEuroCompact(v) {
+  const abs = Math.abs(v);
+  const sign = v < 0 ? '-' : '';
+  if (abs >= 1000000) {
+    const m = abs / 1000000;
+    return sign + (Number.isInteger(m) ? m : m.toFixed(1)).toString().replace('.', ',') + 'M €';
+  }
+  if (abs >= 1000) return sign + Math.round(abs / 1000) + 'k €';
+  return sign + Math.round(abs) + ' €';
+}
+
 /**
- * Zeichnet eine einfache Linie (Restschuld über die Zeit) in ein <canvas>.
+ * Zeichnet die Vermögens-Prognose: zwei Linien (Eingezahlt / Vermögen) mit der
+ * Differenz als eingefärbte Rendite-Fläche dazwischen, plus dezenter Y-Achse.
  * @param {HTMLCanvasElement} canvas
- * @param {number[]} values - Restschuld pro Monat (0 = Startpunkt inklusive)
+ * @param {Array} points - Ausgabe von investmentProjection(): [{month, balance, contributed}]
  */
-function drawBalanceLine(canvas, values, { color = '#C9A24B', fill = 'rgba(201,162,75,0.14)' } = {}) {
+function drawGrowthChart(canvas, points, { balanceColor = '#C9A24B', contributedColor = 'rgba(237,234,226,0.4)', growthFill = 'rgba(78,156,143,0.22)' } = {}) {
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+
+  if (!points || points.length < 2 || points[points.length - 1].balance <= 0) {
+    ctx.fillStyle = 'rgba(237,234,226,0.4)';
+    ctx.font = '13px -apple-system, sans-serif';
+    ctx.fillText('Trag Startkapital oder eine Sparrate ein.', 8, rect.height / 2);
+    return;
+  }
+
+  const maxVal = Math.max(...points.map(p => p.balance), 1);
+  const axisFont = '10px -apple-system, sans-serif';
+  ctx.font = axisFont;
+  const yLabels = [maxVal, maxVal / 2, 0].map(axisEuroCompact);
+  const labelW = Math.max(...yLabels.map(l => ctx.measureText(l).width));
+
+  const padTop = 12, padBottom = 20, padLeft = Math.ceil(labelW) + 8, padRight = 4;
+  const w = rect.width - padLeft - padRight;
+  const h = rect.height - padTop - padBottom;
+
+  const xFor = i => padLeft + (i / (points.length - 1)) * w;
+  const yFor = v => padTop + h - (v / maxVal) * h;
+
+  // Y-Achse: dezente Referenzlinien mit kompakter Beschriftung
+  ctx.strokeStyle = 'rgba(237,234,226,0.08)';
+  ctx.fillStyle = 'rgba(237,234,226,0.45)';
+  ctx.lineWidth = 1;
+  ctx.textBaseline = 'middle';
+  [1, 0.5, 0].forEach((f, i) => {
+    const y = padTop + h - f * h;
+    ctx.beginPath();
+    ctx.moveTo(padLeft, y);
+    ctx.lineTo(padLeft + w, y);
+    ctx.stroke();
+    ctx.fillText(yLabels[i], 0, f === 0 ? y - 5 : y);
+  });
+  ctx.textBaseline = 'alphabetic';
+
+  const balPts = points.map((p, i) => ({ x: xFor(i), y: yFor(p.balance) }));
+  const conPts = points.map((p, i) => ({ x: xFor(i), y: yFor(p.contributed) }));
+
+  // Rendite-Fläche zwischen Eingezahlt- und Vermögens-Linie
+  ctx.beginPath();
+  balPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+  for (let i = conPts.length - 1; i >= 0; i--) ctx.lineTo(conPts[i].x, conPts[i].y);
+  ctx.closePath();
+  ctx.fillStyle = growthFill;
+  ctx.fill();
+
+  // Eingezahlt-Linie (dünn, gestrichelt)
+  ctx.beginPath();
+  conPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+  ctx.strokeStyle = contributedColor;
+  ctx.setLineDash([4, 4]);
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Vermögen-Linie (dick, Akzentfarbe)
+  ctx.beginPath();
+  balPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+  ctx.strokeStyle = balanceColor;
+  ctx.lineWidth = 2.5;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // X-Achse: Start / Ende
+  ctx.fillStyle = 'rgba(237,234,226,0.55)';
+  ctx.font = '11px -apple-system, sans-serif';
+  ctx.fillText('heute', padLeft, rect.height - 4);
+  const years = Math.round(points[points.length - 1].month / 12);
+  const endLabel = `in ${years} ${years === 1 ? 'Jahr' : 'Jahren'}`;
+  const endWidth = ctx.measureText(endLabel).width;
+  ctx.fillText(endLabel, rect.width - padRight - endWidth, rect.height - 4);
+}
+
+/**
+ * Generische Linien-Grafik mit Flächenfüllung und Y-Achse — für alles, was linear
+ * oder grob ansteigend/fallend verläuft (Notgroschen-Rampe, kompakte Mini-Prognosen).
+ */
+function drawSimpleLine(canvas, values, { color = '#C9A24B', fill = 'rgba(201,162,75,0.14)', startLabel = 'heute', endLabel = '' } = {}) {
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -673,17 +790,39 @@ function drawBalanceLine(canvas, values, { color = '#C9A24B', fill = 'rgba(201,1
     return;
   }
 
-  const padTop = 10, padBottom = 20, padLeft = 4, padRight = 4;
+  const max = Math.max(...values, 1);
+  const min = Math.min(...values, 0);
+  const range = Math.max(max - min, 1);
+
+  const axisFont = '10px -apple-system, sans-serif';
+  ctx.font = axisFont;
+  const yLabels = [max, (max + min) / 2, min].map(axisEuroCompact);
+  const labelW = Math.max(...yLabels.map(l => ctx.measureText(l).width));
+
+  const padTop = 12, padBottom = 20, padLeft = Math.ceil(labelW) + 8, padRight = 4;
   const w = rect.width - padLeft - padRight;
   const h = rect.height - padTop - padBottom;
-  const max = Math.max(...values, 1);
 
   const pts = values.map((v, i) => ({
     x: padLeft + (i / (values.length - 1)) * w,
-    y: padTop + h - (v / max) * h
+    y: padTop + h - ((v - min) / range) * h
   }));
 
-  // Fläche unter der Linie
+  // Y-Achse
+  ctx.strokeStyle = 'rgba(237,234,226,0.08)';
+  ctx.fillStyle = 'rgba(237,234,226,0.45)';
+  ctx.lineWidth = 1;
+  ctx.textBaseline = 'middle';
+  [1, 0.5, 0].forEach((f, i) => {
+    const y = padTop + h - f * h;
+    ctx.beginPath();
+    ctx.moveTo(padLeft, y);
+    ctx.lineTo(padLeft + w, y);
+    ctx.stroke();
+    ctx.fillText(yLabels[i], 0, f === 0 ? y - 5 : y);
+  });
+  ctx.textBaseline = 'alphabetic';
+
   ctx.beginPath();
   ctx.moveTo(pts[0].x, padTop + h);
   pts.forEach(p => ctx.lineTo(p.x, p.y));
@@ -692,7 +831,6 @@ function drawBalanceLine(canvas, values, { color = '#C9A24B', fill = 'rgba(201,1
   ctx.fillStyle = fill;
   ctx.fill();
 
-  // Linie
   ctx.beginPath();
   pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
   ctx.strokeStyle = color;
@@ -700,13 +838,13 @@ function drawBalanceLine(canvas, values, { color = '#C9A24B', fill = 'rgba(201,1
   ctx.lineJoin = 'round';
   ctx.stroke();
 
-  // Achsenbeschriftung: Start / Ende
   ctx.fillStyle = 'rgba(237,234,226,0.55)';
   ctx.font = '11px -apple-system, sans-serif';
-  ctx.fillText('heute', padLeft, rect.height - 4);
-  const endLabel = 'schuldenfrei';
-  const endWidth = ctx.measureText(endLabel).width;
-  ctx.fillText(endLabel, rect.width - padRight - endWidth, rect.height - 4);
+  if (startLabel) ctx.fillText(startLabel, padLeft, rect.height - 4);
+  if (endLabel) {
+    const endWidth = ctx.measureText(endLabel).width;
+    ctx.fillText(endLabel, rect.width - padRight - endWidth, rect.height - 4);
+  }
 }
 
 /**
@@ -996,6 +1134,34 @@ function investmentProjection(startBalance, monthlyContribution, annualReturnPct
   return points;
 }
 
+/**
+ * Findet, in welchem Monat das Vermögen bestimmte Schwellenwerte erstmals übersteigt.
+ * @returns {Object} { [milestone]: monthsFromNow | null } — null = nicht in maxMonths erreicht
+ */
+function findMilestoneMonths(startBalance, monthlyContribution, annualReturnPct, milestones, maxMonths = 600) {
+  const r = (Number(annualReturnPct) || 0) / 100 / 12;
+  const results = {};
+  const remaining = new Set();
+  for (const m of milestones) {
+    if (Number(startBalance) >= m) results[m] = 0;
+    else remaining.add(m);
+  }
+  let balance = Number(startBalance) || 0;
+  let month = 0;
+  while (remaining.size > 0 && month < maxMonths) {
+    month++;
+    balance = balance * (1 + r) + (Number(monthlyContribution) || 0);
+    for (const m of remaining) {
+      if (balance >= m) {
+        results[m] = month;
+        remaining.delete(m);
+      }
+    }
+  }
+  for (const m of remaining) results[m] = null;
+  return results;
+}
+
 
 // ============================================================
 // localStorage + JSON-Backup
@@ -1106,6 +1272,8 @@ class Store {
     const loaded = loadState();
     this.state = loaded ? migrate(loaded) : defaultState();
     this.listeners = new Set();
+    const changed = accrueMonthlyContributions(this.state);
+    if (changed) saveState(this.state);
   }
 
   getState() {
@@ -1214,7 +1382,7 @@ class Store {
 
   // ---- Sparen & Investieren ----
   addInvestment(entry) {
-    this.state.investments.push({ id: uid('inv'), ...entry });
+    this.state.investments.push({ id: uid('inv'), lastAccrualMonth: currentMonthKey(), ...entry });
     this._notify();
   }
   updateInvestment(id, patch) {
@@ -1247,6 +1415,44 @@ function migrate(state) {
     settings: { ...base.settings, ...(state.settings || {}) },
     emergencyFund: { ...base.emergencyFund, ...(state.emergencyFund || {}) }
   };
+}
+
+/** Anzahl volle Kalendermonate zwischen zwei "YYYY-MM"-Schlüsseln. */
+function monthsBetween(fromKey, toKey) {
+  const [fy, fm] = fromKey.split('-').map(Number);
+  const [ty, tm] = toKey.split('-').map(Number);
+  return (ty - fy) * 12 + (tm - fm);
+}
+
+/**
+ * Schreibt fällige Sparraten automatisch auf den Kontostand jedes Investments —
+ * einmal pro echtem Kalendermonat, unabhängig davon, wie oft die App geöffnet wird.
+ * Läuft beim Laden der App; holt bei längerer Abwesenheit mehrere Monate auf einmal nach.
+ * Bewusst OHNE die angenommene Rendite gleich mit einzurechnen — die reale Wertentwicklung
+ * kennt nur dein Depot, die Rendite dient nur der Projektion, nicht dem echten Kontostand.
+ */
+function accrueMonthlyContributions(state) {
+  const nowKey = currentMonthKey();
+  let changed = false;
+  for (const inv of state.investments) {
+    if (!inv.lastAccrualMonth) {
+      inv.lastAccrualMonth = nowKey;
+      changed = true;
+      continue;
+    }
+    const diff = monthsBetween(inv.lastAccrualMonth, nowKey);
+    if (diff > 0) {
+      const contribution = Number(inv.monthlyContribution) || 0;
+      if (contribution > 0) {
+        const amount = diff * contribution;
+        inv.balance = Math.round((Number(inv.balance) + amount) * 100) / 100;
+        state.savingsLog.push({ id: uid('sav'), month: nowKey, target: inv.id, amount, auto: true });
+      }
+      inv.lastAccrualMonth = nowKey;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 const store = new Store();
@@ -1346,7 +1552,6 @@ function renderCockpit(container, state) {
   const budget = tilgungsBudget(state);
   const minSum = sumMinPayments(debts);
 
-  const hasDebts = debts.length > 0;
   const hasIncomeData = state.income.length > 0 || state.fixedCosts.length > 0;
 
   const wf = computeWaterfall(state);
@@ -1358,7 +1563,7 @@ function renderCockpit(container, state) {
   const investMonthly = totalMonthlyInvestmentContributions(investments);
 
   let sim = null;
-  if (hasDebts && budget > 0) {
+  if (wf.phase === 'debt' && budget > 0) {
     sim = simulatePayoff(debts, budget, state.settings.strategy, state.settings.hybridWeight);
   }
 
@@ -1369,6 +1574,14 @@ function renderCockpit(container, state) {
   };
   const phaseInfo = PHASE_INFO[wf.phase];
 
+  // Für Phase 3 mit Investments: 5-Jahres-Prognose statt Prozent-Dial — bleibt spannend,
+  // auch wenn "100 % erledigt" längst feststeht und sich nicht mehr verändert.
+  let investProjection = null;
+  if (wf.phase === 'invest' && investments.length > 0) {
+    const ret = blendedExpectedReturn(investments);
+    investProjection = investmentProjection(investedTotal, investMonthly, ret, 60);
+  }
+
   let heroPct = 100, heroLabel = 'geschafft', heroValue = '—';
   if (wf.phase === 'debt') {
     heroPct = paidOffPct;
@@ -1378,10 +1591,6 @@ function renderCockpit(container, state) {
     heroPct = efPct;
     heroLabel = 'Notgroschen gefüllt';
     heroValue = Math.round(efPct) + '\u00A0%';
-  } else {
-    heroPct = 100;
-    heroLabel = 'Schulden & Notgroschen erledigt';
-    heroValue = '✓';
   }
 
   container.innerHTML = `
@@ -1393,25 +1602,35 @@ function renderCockpit(container, state) {
       </div>
     </div>
 
-    <div class="cockpit-hero">
-      <div class="cockpit-hero__gauge-wrap">
-        ${compassGaugeSVG(hasDebts || wf.phase !== 'debt' ? heroPct : 100)}
-        <div class="cockpit-hero__center">
-          <div class="cockpit-hero__pct tabular">${heroValue}</div>
-          <div class="cockpit-hero__label">${heroLabel}</div>
+    ${investProjection ? `
+      <div class="cockpit-hero cockpit-hero--projection">
+        <div class="cockpit-hero__proj-label">Voraussichtliches Vermögen in 5 Jahren</div>
+        <div class="cockpit-hero__proj-value tabular">${euro(investProjection[investProjection.length - 1].balance)}</div>
+        <div class="chart-wrap" style="height:90px; margin-top:10px;">
+          <canvas id="cockpit-invest-chart"></canvas>
         </div>
       </div>
-    </div>
+    ` : `
+      <div class="cockpit-hero">
+        <div class="cockpit-hero__gauge-wrap">
+          ${compassGaugeSVG(heroPct)}
+          <div class="cockpit-hero__center">
+            <div class="cockpit-hero__pct tabular">${heroValue}</div>
+            <div class="cockpit-hero__label">${heroLabel}</div>
+          </div>
+        </div>
+      </div>
+    `}
 
-    ${!hasDebts && wf.phase === 'debt' ? `
+    ${wf.phase === 'invest' && investments.length === 0 ? `
       <div class="empty-state">
-        <div class="empty-state__icon">⟡</div>
-        <p>Trag zuerst deine Schulden ein, damit dein Kompass einen Kurs berechnen kann.</p>
-        <button class="btn btn--primary" style="margin-top:14px; width:auto; padding-left:22px; padding-right:22px;" data-goto="debts">Schulden erfassen</button>
+        <div class="empty-state__icon">↗</div>
+        <p>Schulden getilgt, Notgroschen voll — leg jetzt dein erstes Sparziel an, damit hier deine Vermögens-Prognose erscheint.</p>
+        <button class="btn btn--primary" style="margin-top:14px; width:auto; padding-left:22px; padding-right:22px;" data-goto="savings">Investment anlegen</button>
       </div>
     ` : ''}
 
-    ${hasDebts ? `
+    ${wf.phase === 'debt' ? `
       <div class="stat-grid">
         <div class="stat-card">
           <div class="stat-card__label">Restschuld gesamt</div>
@@ -1442,16 +1661,9 @@ function renderCockpit(container, state) {
           Bei diesem Budget dauert die Tilgung sehr lange (über 50 Jahre). Schon eine kleine Erhöhung des monatlichen Betrags würde enorm helfen — schau dir den "Was-wäre-wenn"-Rechner im Tab <strong>Plan</strong> an.
         </div>
       ` : ''}
-
-      <div class="section-title">Restschuld-Prognose</div>
-      <div class="card">
-        <div class="chart-wrap">
-          <canvas id="cockpit-chart"></canvas>
-        </div>
-      </div>
     ` : ''}
 
-    ${!hasDebts ? `
+    ${wf.phase !== 'debt' ? `
       <div class="section-title">Notgroschen</div>
       <div class="card stack">
         <div class="row"><span class="row-label">Ziel (${state.emergencyFund.targetMonths} Monate Fixkosten)</span><span class="row-value tabular">${euro(efTarget)}</span></div>
@@ -1489,13 +1701,10 @@ function renderCockpit(container, state) {
     `}
   `;
 
-  if (hasDebts) {
-    const canvas = container.querySelector('#cockpit-chart');
-    if (canvas && sim) {
-      const values = [currentTotal, ...sim.schedule.map(s => s.totalBalance)];
-      drawBalanceLine(canvas, values);
-    } else if (canvas) {
-      drawBalanceLine(canvas, [currentTotal, currentTotal]);
+  if (investProjection) {
+    const canvas = container.querySelector('#cockpit-invest-chart');
+    if (canvas) {
+      drawGrowthChart(canvas, investProjection);
     }
   }
 
@@ -1946,6 +2155,15 @@ function aggregateInvestmentProjection(investments, years) {
   return { balance, contributed, growth: balance - contributed };
 }
 
+/** Nach Kontostand gewichteter Rendite-Durchschnitt über alle Investments — als Startwert fürs Prognose-Tool. */
+function blendedExpectedReturn(investments) {
+  const weights = investments.map(i => Math.max(Number(i.balance) || 0, 1));
+  const totalW = weights.reduce((s, w) => s + w, 0);
+  if (totalW === 0 || investments.length === 0) return 7;
+  const weighted = investments.reduce((s, i, idx) => s + (Number(i.expectedReturn) || 0) * weights[idx], 0);
+  return weighted / totalW;
+}
+
 function renderSavings(container, state) {
   const ef = state.emergencyFund;
   const efTarget = emergencyFundTarget(state);
@@ -1980,7 +2198,7 @@ function renderSavings(container, state) {
     ${investments.length === 0 ? `
       <div class="empty-state">
         <div class="empty-state__icon">↗</div>
-        <p>Trag hier deine Spar- und Investmentpläne ein — z. B. einen ETF-Sparplan auf einen breiten Weltindex.</p>
+        <p>Trag hier deine Spar- und Investmentpläne ein — z. B. einen ETF-Sparplan auf einen breiten Weltindex. Die Sparrate wird danach automatisch jeden Monat gutgeschrieben, du musst nichts manuell nachtragen.</p>
       </div>
     ` : `
       <div class="stack">${investments.map(inv => renderInvestmentItem(inv)).join('')}</div>
@@ -1989,6 +2207,7 @@ function renderSavings(container, state) {
           <div class="row"><span class="row-label">Investiert gesamt</span><span class="row-value tabular" style="color:var(--accent)">${euro(totalInvestments(investments))}</span></div>
           <div class="row"><span class="row-label">Monatliche Sparraten gesamt</span><span class="row-value tabular">${euro(totalMonthlyInvestmentContributions(investments))}</span></div>
         </div>
+        <p class="field-hint" style="margin-top:10px;">Sparraten werden automatisch jeden Monat gutgeschrieben. Den tatsächlichen Wert (inkl. Kursentwicklung) trägst du am besten ab und zu manuell nach echtem Depotstand nach.</p>
       </div>
     `}
     <button class="fab-add" id="add-investment-btn">+ Spar-/Investmentziel hinzufügen</button>
@@ -2005,15 +2224,54 @@ function renderSavings(container, state) {
         <table class="strategy-table">
           <thead><tr><th>In …</th><th>Eingezahlt</th><th>Vermögen</th><th>davon Rendite</th></tr></thead>
           <tbody>
-            ${[1, 5, 10, 20, 30].map(years => {
+            ${[1, 2, 3].map(years => {
               const p = aggregateInvestmentProjection(investments, years);
               return `<tr><td>${years} ${years === 1 ? 'Jahr' : 'Jahren'}</td><td>${euro(p.contributed)}</td><td>${euro(p.balance)}</td><td style="color:var(--good)">${euro(p.growth)}</td></tr>`;
             }).join('')}
           </tbody>
         </table>
-        <p class="field-hint" style="margin-top:10px;">Simulation auf Basis deiner eigenen Rendite-Annahme je Ziel — keine Anlageberatung, keine Garantie. Tatsächliche Wertentwicklungen schwanken, besonders bei Aktien/ETFs, und die Vergangenheit ist kein verlässlicher Indikator für die Zukunft.</p>
       </div>
     ` : ''}
+
+    <div class="section-title">Wachstums-Prognose</div>
+    <div class="card">
+      <div class="segmented" id="growth-years-picker">
+        ${[1, 2, 3, 5].map(y => `<button type="button" data-years="${y}" class="${y === 5 ? 'active' : ''}">${y} J.</button>`).join('')}
+      </div>
+      <div class="field-row" style="margin-top:14px;">
+        <div class="field" style="margin-bottom:0;">
+          <label for="growth-start">Startkapital</label>
+          <input type="number" inputmode="decimal" min="0" step="10" id="growth-start" value="${totalInvestments(investments).toFixed(2)}" />
+        </div>
+        <div class="field" style="margin-bottom:0;">
+          <label for="growth-rate">Rate / Monat</label>
+          <input type="number" inputmode="decimal" min="0" step="10" id="growth-rate" value="${totalMonthlyInvestmentContributions(investments).toFixed(2)}" />
+        </div>
+      </div>
+      <div class="field" style="margin-top:10px; margin-bottom:0;">
+        <label for="growth-return">Angenommene Rendite p. a. (%)</label>
+        <input type="number" inputmode="decimal" step="0.1" id="growth-return" value="${blendedExpectedReturn(investments).toFixed(1)}" />
+      </div>
+      <div class="chart-wrap" style="margin-top:16px;"><canvas id="growth-chart"></canvas></div>
+      <div class="row" style="font-size:11.5px; color:var(--text-faint); margin-top:4px;">
+        <span>— Vermögen</span><span>┄ Eingezahlt</span><span style="color:var(--good)">▨ Rendite</span>
+      </div>
+      <div class="stat-grid" style="margin-top:14px;">
+        <div class="stat-card">
+          <div class="stat-card__label">Eingezahlt</div>
+          <div class="stat-card__value tabular" id="growth-contributed" style="font-size:18px;">–</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card__label">Vermögen</div>
+          <div class="stat-card__value tabular" id="growth-total" style="font-size:18px; color:var(--accent);">–</div>
+        </div>
+        <div class="stat-card" style="grid-column: span 2;">
+          <div class="stat-card__label">davon Rendite</div>
+          <div class="stat-card__value tabular" id="growth-growth" style="font-size:18px; color:var(--good);">–</div>
+        </div>
+      </div>
+      <p class="field-hint" style="margin-top:10px;">Reine Simulation auf Basis deiner Annahmen — keine Anlageberatung, keine Rendite-Garantie. Passt die Felder oben an, um mit anderen Beträgen zu spielen.</p>
+    </div>
   `;
 
   container.querySelector('#ef-deposit').addEventListener('click', () => openEmergencyFundDepositForm());
@@ -2031,6 +2289,38 @@ function renderSavings(container, state) {
         toast('Gelöscht');
       }
     });
+  });
+
+  // ---- Wachstums-Prognose: reines Was-wäre-wenn-Tool, nichts wird gespeichert ----
+  let growthYears = 5;
+  const growthStartEl = container.querySelector('#growth-start');
+  const growthRateEl = container.querySelector('#growth-rate');
+  const growthReturnEl = container.querySelector('#growth-return');
+
+  function recalcGrowth() {
+    const start = parseFloat(growthStartEl.value.replace(',', '.')) || 0;
+    const rate = parseFloat(growthRateEl.value.replace(',', '.')) || 0;
+    const ret = parseFloat(growthReturnEl.value.replace(',', '.')) || 0;
+    const points = investmentProjection(start, rate, ret, growthYears * 12);
+    const canvas = container.querySelector('#growth-chart');
+    if (canvas) drawGrowthChart(canvas, points);
+    const last = points[points.length - 1];
+    container.querySelector('#growth-contributed').textContent = euro(last.contributed);
+    container.querySelector('#growth-total').textContent = euro(last.balance);
+    container.querySelector('#growth-growth').textContent = euro(last.growth);
+  }
+
+  recalcGrowth();
+
+  container.querySelector('#growth-years-picker').addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    growthYears = Number(btn.dataset.years);
+    container.querySelectorAll('#growth-years-picker button').forEach(b => b.classList.toggle('active', b === btn));
+    recalcGrowth();
+  });
+  [growthStartEl, growthRateEl, growthReturnEl].forEach(el => {
+    el.addEventListener('input', recalcGrowth);
   });
 }
 
@@ -2180,55 +2470,28 @@ const STRATEGY_INFO = {
 };
 
 function renderPlan(container, state) {
-  const debts = state.debts;
-
-  if (debts.length === 0) {
-    const wf = computeWaterfall(state);
-    container.innerHTML = `
-      <div class="section-title">Tilgungsplan</div>
-      <div class="empty-state">
-        <div class="empty-state__icon">✓</div>
-        <p>
-          Keine Schulden erfasst — dieser Tab wird wieder aktiv, sobald du eine Schuld einträgst.
-          ${wf.budget > 0 ? `Aktuell fließt dein freies Budget von ${euro(wf.budget)}/Monat automatisch in ${wf.phase === 'emergency' ? 'deinen Notgroschen' : 'dein Investieren'} — schau dir das im Tab <strong>Sparen</strong> an.` : ''}
-        </p>
-        <button class="btn btn--primary" style="margin-top:14px; width:auto; padding-left:22px; padding-right:22px;" id="goto-savings">Zu Sparen &amp; Investieren</button>
-      </div>
-    `;
-    container.querySelector('#goto-savings').addEventListener('click', () => {
-      document.querySelector('.tabbar__item[data-tab="savings"]')?.click();
-    });
+  const wf = computeWaterfall(state);
+  if (wf.phase === 'emergency') {
+    renderEmergencyPlan(container, state, wf);
     return;
   }
+  if (wf.phase === 'invest') {
+    renderInvestPlan(container, state, wf);
+    return;
+  }
+  renderDebtPlan(container, state);
+}
 
-  const strategy = state.settings.strategy;
-  const hybridWeight = state.settings.hybridWeight;
+function renderDebtPlan(container, state) {
+  const debts = state.debts;
+
+  const strategy = 'avalanche';
   const recommendedBudget = Math.max(0, freeBudget(state));
   const budget = tilgungsBudget(state);
   const minSum = sumMinPayments(debts);
   const month = currentMonthKey();
 
   container.innerHTML = `
-    <div class="section-title">Strategie</div>
-    <div class="card">
-      <div class="segmented" id="strategy-picker">
-        ${Object.entries(STRATEGY_INFO).map(([key, info]) => `
-          <button type="button" data-strategy="${key}" class="${strategy === key ? 'active' : ''}">${info.label}</button>
-        `).join('')}
-      </div>
-      <p class="field-hint" id="strategy-desc" style="margin-top:10px; line-height:1.5;">${STRATEGY_INFO[strategy].desc}</p>
-      <div id="hybrid-slider-wrap" style="margin-top:14px; ${strategy === 'hybrid' ? '' : 'display:none;'}">
-        <div class="row" style="margin-bottom:6px;">
-          <span class="field-hint">Zinsersparnis</span>
-          <span class="field-hint" id="hybrid-weight-label">${Math.round(hybridWeight * 100)} %</span>
-          <span class="field-hint">Schnelle Erfolge</span>
-        </div>
-        <div class="slider-field">
-          <input type="range" id="hybrid-slider" min="0" max="100" step="5" value="${Math.round(hybridWeight * 100)}" />
-        </div>
-      </div>
-    </div>
-
     <div class="section-title">Monatliches Tilgungsbudget</div>
     <div class="card">
       <div class="field" style="margin-bottom:8px;">
@@ -2239,6 +2502,7 @@ function renderPlan(container, state) {
         <span class="field-hint">Empfohlen (Einkommen − Fixkosten − Puffer): ${euro(recommendedBudget)}</span>
         <button class="btn btn--ghost btn--sm" id="reset-budget-btn" style="padding:2px 0;">Zurücksetzen</button>
       </div>
+      <p class="field-hint" style="margin-top:10px; line-height:1.5;">${STRATEGY_INFO.avalanche.desc}</p>
     </div>
 
     <div id="insufficient-warning"></div>
@@ -2263,21 +2527,6 @@ function renderPlan(container, state) {
       </div>
     </div>
 
-    <div class="section-title">Restschuld-Verlauf</div>
-    <div class="card">
-      <div class="chart-wrap"><canvas id="plan-chart"></canvas></div>
-    </div>
-
-    <div class="section-title">Strategievergleich bei ${euro(budget)}/Monat</div>
-    <div class="card" style="overflow-x:auto;">
-      <table class="strategy-table" id="strategy-table">
-        <thead>
-          <tr><th>Strategie</th><th>Dauer</th><th>Zinsen</th></tr>
-        </thead>
-        <tbody id="strategy-table-body"></tbody>
-      </table>
-    </div>
-
     <div class="section-title">Reihenfolge der Tilgung</div>
     <div class="card" id="payoff-order-card"></div>
 
@@ -2285,11 +2534,10 @@ function renderPlan(container, state) {
     <div class="stack" id="monthly-payments"></div>
   `;
 
-  // ---- Live-Rechenkern: nutzt ggf. noch nicht gespeicherte Slider-/Eingabewerte ----
-  function recalcAndPatch(liveBudget, liveHybridWeight) {
+  // ---- Live-Rechenkern: nutzt ggf. noch nicht gespeicherten Budget-Wert ----
+  function recalcAndPatch(liveBudget) {
     const b = Math.max(0, liveBudget);
-    const sim = simulatePayoff(debts, b, strategy, liveHybridWeight);
-    const cmp = compareStrategies(debts, b, liveHybridWeight);
+    const sim = simulatePayoff(debts, b, strategy);
 
     if (sim.reachedZero) {
       container.querySelector('#plan-duration').textContent = durationText(sim.months);
@@ -2309,23 +2557,6 @@ function renderPlan(container, state) {
     } else {
       warnEl.innerHTML = '';
     }
-
-    const canvas = container.querySelector('#plan-chart');
-    if (canvas) {
-      const values = [totalDebtBalance(debts), ...sim.schedule.map(s => s.totalBalance)];
-      drawBalanceLine(canvas, values);
-    }
-
-    const rows = Object.entries(cmp).map(([key, res]) => ({ key, res }));
-    const bestInterest = Math.min(...rows.map(r => r.res.reachedZero ? r.res.totalInterest : Infinity));
-    const durationLabel = (res) => res.reachedZero ? durationText(res.months) : (res.insufficientBudget ? 'nie' : '> 50 J.');
-    container.querySelector('#strategy-table-body').innerHTML = rows.map(({ key, res }) => `
-      <tr class="${key === strategy ? 'selected' : ''}">
-        <td>${STRATEGY_INFO[key].label}${key === strategy ? ' ✓' : ''}</td>
-        <td>${durationLabel(res)}</td>
-        <td>${res.reachedZero ? euro(res.totalInterest) + (res.totalInterest === bestInterest ? ' ★' : '') : '—'}</td>
-      </tr>
-    `).join('');
 
     // Reihenfolge der Tilgung mit Datum
     const orderCard = container.querySelector('#payoff-order-card');
@@ -2353,28 +2584,8 @@ function renderPlan(container, state) {
     return sim;
   }
 
-  recalcAndPatch(budget, hybridWeight);
-  renderMonthlyPayments(container, state, budget, strategy, hybridWeight, month);
-
-  // ---- Strategie wählen (Klick, kein Drag-Problem) ----
-  container.querySelector('#strategy-picker').addEventListener('click', (e) => {
-    const btn = e.target.closest('button');
-    if (!btn) return;
-    store.updateSettings({ strategy: btn.dataset.strategy });
-  });
-
-  // ---- Hybrid-Regler: live patchen während Drag, erst bei "change" speichern ----
-  const hybridSlider = container.querySelector('#hybrid-slider');
-  if (hybridSlider) {
-    hybridSlider.addEventListener('input', () => {
-      const w = Number(hybridSlider.value) / 100;
-      container.querySelector('#hybrid-weight-label').textContent = `${hybridSlider.value} %`;
-      recalcAndPatch(currentLiveBudget(), w);
-    });
-    hybridSlider.addEventListener('change', () => {
-      store.updateSettings({ hybridWeight: Number(hybridSlider.value) / 100 });
-    });
-  }
+  recalcAndPatch(budget);
+  renderMonthlyPayments(container, state, budget, strategy, 0.3, month);
 
   // ---- Budget-Eingabe: live patchen, erst bei "change"/blur speichern ----
   const budgetInput = container.querySelector('#budget-input');
@@ -2383,20 +2594,156 @@ function renderPlan(container, state) {
     return isNaN(v) ? 0 : v;
   }
   budgetInput.addEventListener('input', () => {
-    recalcAndPatch(currentLiveBudget(), currentHybridWeight());
+    recalcAndPatch(currentLiveBudget());
   });
   budgetInput.addEventListener('change', () => {
     store.updateSettings({ tilgungsBudgetOverride: currentLiveBudget() });
   });
-  function currentHybridWeight() {
-    return hybridSlider ? Number(hybridSlider.value) / 100 : hybridWeight;
-  }
 
   container.querySelector('#reset-budget-btn').addEventListener('click', () => {
     store.updateSettings({ tilgungsBudgetOverride: null });
     toast('Auf empfohlenen Betrag zurückgesetzt');
   });
 }
+
+// ============================================================
+// View: Plan — Phase 2 (Notgroschen-Fahrplan)
+// ============================================================
+function renderEmergencyPlan(container, state, wf) {
+  const ef = state.emergencyFund;
+  const efTarget = wf.efTarget;
+  const efBalance = wf.efBalance;
+  const efPct = efTarget > 0 ? Math.min(100, (efBalance / efTarget) * 100) : (efBalance > 0 ? 100 : 0);
+  const gap = Math.max(0, efTarget - efBalance);
+  const monthlyAvailable = wf.toEmergencyFund;
+  const monthsToTarget = monthlyAvailable > 0.5 ? Math.ceil(gap / monthlyAvailable) : null;
+
+  container.innerHTML = `
+    <div class="section-title">Notgroschen-Fahrplan</div>
+    <div class="card stack">
+      <div class="row"><span class="row-label">Ziel (${ef.targetMonths} Monate Fixkosten)</span><span class="row-value tabular">${euro(efTarget)}</span></div>
+      <div class="row"><span class="row-label">Aktueller Stand</span><span class="row-value tabular" style="color:var(--good)">${euro(efBalance)}</span></div>
+      <div class="progress-bar"><div class="progress-bar__fill" style="width:${efPct}%;"></div></div>
+      <div class="field-row" style="margin-top:6px;">
+        <button class="btn btn--secondary btn--sm" id="ef-edit-target-plan" style="flex:1;">Ziel anpassen</button>
+        <button class="btn btn--primary btn--sm" id="ef-deposit-plan" style="flex:1;">+ Einzahlen</button>
+      </div>
+    </div>
+
+    ${monthlyAvailable <= 0.5 ? `
+      <div class="callout callout--danger" style="margin-top:14px;">
+        Aktuell bleibt kein freies Budget für den Notgroschen übrig. Prüf deine Fixkosten oder deinen Sicherheitspuffer in den Einstellungen.
+      </div>
+    ` : `
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="stat-card__label">Noch nötig</div>
+          <div class="stat-card__value tabular">${euro(gap)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card__label">Monatlich verfügbar</div>
+          <div class="stat-card__value tabular stat-card__value--good">${euro(monthlyAvailable)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card__label">Noch benötigt</div>
+          <div class="stat-card__value tabular">${monthsToTarget !== null ? durationText(monthsToTarget) : '—'}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-card__label">Voll ab</div>
+          <div class="stat-card__value tabular">${monthsToTarget !== null ? monthLong(monthsFromNow(monthsToTarget)) : '—'}</div>
+        </div>
+      </div>
+
+      <div class="section-title">Verlauf bis zum Ziel</div>
+      <div class="card">
+        <div class="chart-wrap"><canvas id="ef-plan-chart"></canvas></div>
+      </div>
+    `}
+
+    <div class="callout callout--accent" style="margin-top:14px;">
+      Danach beginnt automatisch <strong>Phase 3</strong>: Dein gesamtes freies Budget fließt dann ins Investieren — du musst dafür nichts umstellen.
+    </div>
+  `;
+
+  if (monthsToTarget !== null) {
+    const canvas = container.querySelector('#ef-plan-chart');
+    if (canvas) {
+      const values = [];
+      for (let m = 0; m <= monthsToTarget; m++) {
+        values.push(Math.min(efTarget, efBalance + m * monthlyAvailable));
+      }
+      drawSimpleLine(canvas, values, { color: '#4E9C8F', fill: 'rgba(78,156,143,0.16)', endLabel: 'Notgroschen voll' });
+    }
+  }
+
+  container.querySelector('#ef-deposit-plan').addEventListener('click', () => openEmergencyFundDepositForm());
+  container.querySelector('#ef-edit-target-plan').addEventListener('click', () => openEmergencyFundTargetForm());
+}
+
+
+// ============================================================
+// View: Plan — Phase 3 (Investieren: Meilensteine)
+// ============================================================
+function renderInvestPlan(container, state, wf) {
+  const investments = state.investments;
+
+  if (investments.length === 0) {
+    container.innerHTML = `
+      <div class="section-title">Meilensteine</div>
+      <div class="empty-state">
+        <div class="empty-state__icon">↗</div>
+        <p>Schulden getilgt, Notgroschen voll! Leg im Tab <strong>Sparen</strong> dein erstes Spar-/Investmentziel an, dann siehst du hier, wann du welche Vermögens-Meilensteine erreichst.</p>
+        <button class="btn btn--primary" style="margin-top:14px; width:auto; padding-left:22px; padding-right:22px;" id="goto-savings-plan">Zu Sparen &amp; Investieren</button>
+      </div>
+    `;
+    container.querySelector('#goto-savings-plan').addEventListener('click', () => {
+      document.querySelector('.tabbar__item[data-tab="savings"]')?.click();
+    });
+    return;
+  }
+
+  const start = totalInvestments(investments);
+  const rate = totalMonthlyInvestmentContributions(investments);
+  const ret = blendedExpectedReturn(investments);
+  const MILESTONES = [10000, 25000, 50000, 100000, 250000, 500000, 1000000];
+  const results = findMilestoneMonths(start, rate, ret, MILESTONES);
+  const upcoming = MILESTONES.filter(m => results[m] !== 0);
+  const lastAchieved = MILESTONES.filter(m => results[m] === 0).pop();
+
+  container.innerHTML = `
+    <div class="section-title">Meilensteine</div>
+    <div class="card stack">
+      <div class="row"><span class="row-label">Aktuell investiert</span><span class="row-value tabular" style="color:var(--accent)">${euro(start)}</span></div>
+      <div class="row"><span class="row-label">Monatliche Sparraten</span><span class="row-value tabular">${euro(rate)}</span></div>
+      <div class="row"><span class="row-label">Angenommene Ø-Rendite p. a.</span><span class="row-value tabular">${percent(ret, 1)}</span></div>
+    </div>
+
+    ${wf.toInvest > 0 ? `
+      <div class="callout callout--accent" style="margin-top:10px;">
+        Laut Plan stehen dir aktuell <strong>${euro(wf.toInvest)}/Monat</strong> fürs Investieren zur Verfügung.
+      </div>
+    ` : ''}
+
+    <div class="section-title">Wann erreichst du …</div>
+    <div class="card">
+      ${lastAchieved ? `
+        <div class="row" style="padding:7px 0; border-bottom:1px solid var(--border);">
+          <span class="row-label">${euro(lastAchieved)}</span>
+          <span class="pill pill--good">✓ erreicht</span>
+        </div>
+      ` : ''}
+      ${upcoming.map((m, i) => `
+        <div class="row" style="padding:7px 0; ${i > 0 || lastAchieved ? 'border-top:1px solid var(--border);' : ''}">
+          <span class="row-label">${euro(m)}</span>
+          <span class="row-value tabular">${results[m] !== null ? monthLong(monthsFromNow(results[m])) : 'nicht in 50 Jahren'}</span>
+        </div>
+      `).join('')}
+    </div>
+
+    <p class="field-hint" style="margin-top:12px;">Simulation auf Basis deiner aktuellen Sparraten und einer angenommenen, nach Kontostand gewichteten Ø-Rendite — keine Anlageberatung, keine Garantie. Feintuning und die Wachstums-Grafik findest du im Tab <strong>Sparen</strong>.</p>
+  `;
+}
+
 
 function renderMonthlyPayments(container, state, budget, strategy, hybridWeight, month) {
   const debts = state.debts;
@@ -2419,13 +2766,11 @@ function renderMonthlyPayments(container, state, budget, strategy, hybridWeight,
         ${logged ? `
           <button class="btn btn--ghost btn--sm" data-undo="${d.id}" style="margin-top:6px;">Eintrag rückgängig machen</button>
         ` : `
-          <div class="field-row" style="margin-top:10px; align-items:flex-end;">
-            <div class="field" style="margin-bottom:0;">
-              <label>Zahlung diesen Monat</label>
-              <input type="number" inputmode="decimal" min="0" step="0.01" value="${suggested.toFixed(2)}" data-amount-input="${d.id}" />
-            </div>
-            <button class="btn btn--primary btn--sm" data-confirm-payment="${d.id}" style="height:44px;">Eintragen</button>
+          <div class="field" style="margin-top:10px; margin-bottom:8px;">
+            <label>Zahlung diesen Monat</label>
+            <input type="number" inputmode="decimal" min="0" step="0.01" value="${suggested.toFixed(2)}" data-amount-input="${d.id}" />
           </div>
+          <button class="btn btn--primary btn--sm btn--block" data-confirm-payment="${d.id}">Eintragen</button>
         `}
       </div>
     `;
